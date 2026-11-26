@@ -1,7 +1,7 @@
 {
   "id": "peliskronos",
-  "name": "Pelis KRONOS",
-  "version": "0.1.20",
+  "name": "Cine KRONOS",
+  "version": "0.1.21",
   "apiVersion": 9,
   "entry": "plugin.js",
   "icon": "",
