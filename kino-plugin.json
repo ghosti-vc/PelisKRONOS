@@ -1,7 +1,7 @@
 {
   "id": "peliskronos",
   "name": "PelisKRONOS",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "apiVersion": 9,
   "entry": "plugin.js",
   "icon": "",
@@ -26,7 +26,8 @@
     "*.vimeos.zip",
     "pelisgo.online",
     "www.pelisgo.online",
-    "www.wikidata.org"
+    "www.wikidata.org",
+    "image.tmdb.org"
   ],
   "streamHosts": "any",
   "capabilities": [
