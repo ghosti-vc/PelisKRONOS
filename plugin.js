@@ -41,6 +41,57 @@ function genreOf(list) {
   return out.length ? out : undefined;
 }
 
+
+// ---- Catálogo en español desde TMDB (kino.tmdb: la llave la pone Kino, el plugin no guarda ninguna) --------
+// Si este Kino no trae kino.tmdb o TMDB falla, se usa Cinemeta como antes.
+const TM_GENRES = {
+  28: "accion", 12: "aventura", 16: "animacion", 35: "comedia", 80: "crimen", 99: "documental", 18: "drama",
+  10751: "familia", 14: "fantasia", 36: "historia", 27: "terror", 10402: "musical", 9648: "misterio",
+  10749: "romance", 878: "ciencia-ficcion", 53: "suspenso", 10752: "guerra", 37: "western",
+  10759: "accion", 10765: "ciencia-ficcion", 10768: "guerra",
+};
+async function tm(path, params, ms) {
+  if (typeof kino.tmdb !== "function") throw kino.error("unavailable", "sin kino.tmdb");
+  return await withTimeout(kino.tmdb(path, params || {}), ms || 7000);
+}
+function tmItem(r, type) {
+  if (!r || !r.id) return null;
+  const movie = type === "movie";
+  const title = String((movie ? r.title : r.name) || "").trim();
+  if (!title) return null;
+  const id = (movie ? "tmm_" : "tms_") + r.id;
+  const item = { id: id, ref: id, kind: movie ? "movie" : "series", title: title.slice(0, 200), ids: { tmdb: r.id } };
+  if (r.poster_path) item.poster = "https://image.tmdb.org/t/p/w500" + r.poster_path;
+  if (r.backdrop_path) item.backdrop = "https://image.tmdb.org/t/p/w780" + r.backdrop_path;
+  if (r.overview) item.overview = String(r.overview).slice(0, 1800);
+  const orig = String((movie ? r.original_title : r.original_name) || "").trim();
+  if (orig && normTitle(orig) !== normTitle(title)) item.originalTitle = orig;
+  const g = [];
+  for (const n of r.genre_ids || []) { const k = TM_GENRES[n]; if (k && g.indexOf(k) < 0) g.push(k); }
+  if (g.length) item.genres = g;
+  const ym = /^(\d{4})/.exec(String((movie ? r.release_date : r.first_air_date) || ""));
+  if (ym && Number(ym[1]) > 1800) item.year = Number(ym[1]);
+  if (typeof r.vote_average === "number" && r.vote_average > 0 && r.vote_average <= 10) item.rating = Math.round(r.vote_average * 10) / 10;
+  return item;
+}
+// Número de IMDb (tt…) de un título de TMDB: el addon KRONOS lo pide por ese número.
+const EXT = {};
+async function tmToImdb(ref) {
+  const m = /^tm([ms])_(\d+)$/.exec(String(ref || ""));
+  if (!m) return ref;
+  const key = m[1] + m[2];
+  if (!EXT[key]) {
+    EXT[key] = (async () => {
+      const d = await tm("/" + (m[1] === "m" ? "movie/" : "tv/") + m[2] + "/external_ids", {});
+      const imdb = d && d.imdb_id;
+      if (!imdb || !/^tt\d+$/.test(imdb)) throw kino.error("not_found", "sin número de IMDb");
+      return imdb;
+    })();
+    EXT[key].catch(() => { delete EXT[key]; });
+  }
+  return await EXT[key];
+}
+
 function toItem(m) {
   if (!m) return null;
   const id = m.imdb_id || m.id;
@@ -88,10 +139,38 @@ const ROWS = [
   ["documental", "series", "top/genre=Documentary", "documentales", "Documentales", "Documentaries"],
 ];
 
+// Cada fila: id, tipo, ruta TMDB, parámetros, género, título es/en.
+const TM_ROWS = [
+  ["peli-top", "movie", "/movie/popular", {}],
+  ["peli-rating", "movie", "/movie/top_rated", {}],
+  ["serie-top", "tv", "/tv/popular", {}],
+  ["serie-rating", "tv", "/tv/top_rated", {}],
+  ["accion", "movie", "/discover/movie", { with_genres: "28" }],
+  ["comedia", "movie", "/discover/movie", { with_genres: "35" }],
+  ["drama", "movie", "/discover/movie", { with_genres: "18" }],
+  ["terror", "movie", "/discover/movie", { with_genres: "27" }],
+  ["suspenso", "movie", "/discover/movie", { with_genres: "53" }],
+  ["scifi", "movie", "/discover/movie", { with_genres: "878" }],
+  ["romance", "movie", "/discover/movie", { with_genres: "10749" }],
+  ["animacion", "tv", "/discover/tv", { with_genres: "16" }],
+  ["documental", "tv", "/discover/tv", { with_genres: "99" }],
+];
 export async function home() {
-  const jobs = ROWS.map(async (row) => {
-    const data = await getJson(CINEMETA + "/catalog/" + row[1] + "/" + row[2] + ".json");
-    const items = (data.metas || []).map(toItem).filter(Boolean).slice(0, 40);
+  const jobs = ROWS.map(async (row, i) => {
+    const tr = TM_ROWS[i];
+    let items = [];
+    try {
+      const params = Object.assign({ language: "es-MX", page: 1 }, tr[3]);
+      if (tr[2].indexOf("/discover/") === 0) { params.sort_by = "popularity.desc"; params["vote_count.gte"] = "50"; }
+      const d = await tm(tr[2], params);
+      items = ((d && d.results) || []).map((r) => tmItem(r, tr[1])).filter(Boolean).slice(0, 40);
+    } catch (e) {
+      kino.log("home: TMDB falló en " + row[0] + " (" + String((e && e.message) || e).slice(0, 50) + "), uso Cinemeta");
+    }
+    if (!items.length) {
+      const data = await getJson(CINEMETA + "/catalog/" + row[1] + "/" + row[2] + ".json");
+      items = (data.metas || []).map(toItem).filter(Boolean).slice(0, 40);
+    }
     if (!items.length) return null;
     return { id: row[0], title: t(row[4], row[5]), genre: row[3], items: items };
   });
@@ -110,6 +189,22 @@ export async function search(query) {
   const raw = typeof query === "string" ? query : (query && (query.q || query.query || query.text || query.term)) || "";
   const q = String(raw).trim();
   if (!q) return [];
+  if (typeof kino.tmdb === "function") {
+    try {
+      const d = await tm("/search/multi", { query: q, language: "es-MX", include_adult: false, page: 1 });
+      const res = [];
+      for (const r of (d && d.results) || []) {
+        if (r.media_type !== "movie" && r.media_type !== "tv") continue;
+        const it = tmItem(r, r.media_type);
+        if (it) res.push(it);
+        if (res.length >= 60) break;
+      }
+      kino.log("búsqueda TMDB: " + res.length);
+      if (res.length) return res;
+    } catch (e) {
+      kino.log("búsqueda: TMDB falló (" + String((e && e.message) || e).slice(0, 50) + "), uso Cinemeta");
+    }
+  }
   const enc = encodeURIComponent(q);
   const urls = [
     CINEMETA + "/catalog/movie/top/search=" + enc + ".json",
@@ -139,6 +234,7 @@ export async function search(query) {
 
 export async function episodes(ref) {
   await null;
+  ref = await tmToImdb(ref);
   const id = String(ref || "").split(":")[0];
   if (!/^tt\d+$/.test(id)) throw kino.error("not_found", "ref " + ref);
   const data = await getJson(CINEMETA + "/meta/series/" + id + ".json");
@@ -1085,6 +1181,18 @@ async function altTitles(imdb) {
   kino.log("títulos en español: " + out.length + (out[0] ? " (" + out[0].slice(0, 30) + ")" : ""));
   return out.slice(0, 3);
 }
+// Título en español pedido a TMDB (es-MX y es-ES); si no hay kino.tmdb o falla, se usa Wikidata.
+async function tmAlts(type, tmdb, enTitle) {
+  if (!tmdb || typeof kino.tmdb !== "function") return [];
+  const path = (type === "series" ? "/tv/" : "/movie/") + tmdb;
+  const out = [];
+  const add = (s) => { s = String(s || "").trim(); if (s && normTitle(s) !== normTitle(enTitle) && !out.some((o) => normTitle(o) === normTitle(s))) out.push(s); };
+  const rs = await Promise.all(["es-MX", "es-ES"].map((l) => tm(path, { language: l }, 5000).catch(() => null)));
+  for (const d of rs) if (d) add(type === "series" ? d.name : d.title);
+  for (const d of rs) if (d) add(type === "series" ? d.original_name : d.original_title);
+  kino.log("títulos en español (TMDB): " + out.length + (out[0] ? " (" + out[0].slice(0, 30) + ")" : ""));
+  return out.slice(0, 3);
+}
 const INFO = {};
 function backupInfo(id, type) {
   if (INFO[id]) return INFO[id];
@@ -1096,7 +1204,7 @@ function backupInfo(id, type) {
       year: parseInt(meta.year || meta.releaseInfo, 10) || 0,
       tmdb: parseInt(meta.moviedb_id, 10) || 0,
     };
-    info.alts = altTitles(id).catch((e) => { kino.log("títulos en español: " + String((e && e.message) || e).slice(0, 40)); return []; });
+    info.alts = tmAlts(type, info.tmdb, info.title).then((a) => (a.length ? a : altTitles(id))).catch((e) => { kino.log("títulos en español: " + String((e && e.message) || e).slice(0, 40)); return []; });
     return info;
   })();
   p.catch(() => { delete INFO[id]; });
@@ -1193,6 +1301,7 @@ async function pgResolve(id, season, ep, deadline) {
 export async function resolve(ref) {
   await null;
   const t0 = Date.now();
+  ref = await tmToImdb(ref);
   const parts = String(ref || "").split(":");
   const id = parts[0];
   if (!/^tt\d+$/.test(id)) throw kino.error("not_found", "ref " + ref);
